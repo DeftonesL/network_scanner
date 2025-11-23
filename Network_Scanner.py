@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Modern Network Scanner
-Author: Saleh (Custom Built)
-Features: ARP Discovery, Multi-threaded Port Scan, Banner Grabbing, MAC Vendor Lookup.
+Ultimate Network Scanner v3.0
+Author: Saleh
+Features: ARP Discovery, OS Detection (TTL), ThreadPool Port Scan, Custom Ranges, Banner Grabbing.
 """
 
 import scapy.all as scapy
@@ -12,156 +12,175 @@ import argparse
 import socket
 import requests
 import json
-import threading
-from queue import Queue
+import concurrent.futures
 from datetime import datetime
 from colorama import init, Fore, Style
+from tqdm import tqdm  # شريط التقدم
 
-# Initialize Colorama for auto-resetting colors
+# Initialize Colorama
 init(autoreset=True)
 
 # Configuration
-COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 3306, 3389, 8080, 8443]
 Mac_Vendor_API = "https://api.macvendors.co/"
 
 class NetworkScanner:
     def __init__(self):
         self.target_ip = ""
+        self.port_range = []
         self.results = []
-        self.lock = threading.Lock()
 
     def get_arguments(self):
-        """Parse command line arguments."""
-        parser = argparse.ArgumentParser(description="Advanced Python Network Scanner")
-        parser.add_argument("-t", "--target", dest="target", help="Target IP / IP Range (e.g. 192.168.1.1/24)", required=True)
-        parser.add_argument("--ports", dest="ports", help="Scan specific ports? (yes/no)", default="no")
+        parser = argparse.ArgumentParser(description="Ultimate Python Network Scanner v3.0")
+        parser.add_argument("-t", "--target", dest="target", help="Target IP / Range (e.g. 192.168.1.1/24)", required=True)
+        parser.add_argument("-p", "--ports", dest="ports", help="Port range (e.g. 1-1000, or 'top')", default="top")
         options = parser.parse_args()
+        
         self.target_ip = options.target
+        self.port_range = self.parse_ports(options.ports)
         return options
 
+    def parse_ports(self, port_str):
+        """Convert port argument into a list of integers."""
+        if port_str == "top":
+            return [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 3306, 3389, 5900, 8080, 8443]
+        elif "-" in port_str:
+            start, end = map(int, port_str.split("-"))
+            return range(start, end + 1)
+        else:
+            return [int(p) for p in port_str.split(",")]
+
     def print_logo(self):
-        print(Fore.GREEN + """
-        ╔══════════════════════════════════════╗
-        ║     ADVANCED NETWORK SCANNER v2.0    ║
-        ║     [ARP] [TCP] [Banner Grab]        ║
-        ╚══════════════════════════════════════╝
+        print(Fore.CYAN + Style.BRIGHT + """
+    ╔═══════════════════════════════════════════════╗
+    ║      ULTIMATE NETWORK SCANNER v3.0 🚀         ║
+    ║   [OS Detect] [ThreadPools] [Smart Scan]      ║
+    ╚═══════════════════════════════════════════════╝
         """ + Style.RESET_ALL)
 
     def get_mac_vendor(self, mac_address):
-        """Fetch device manufacturer via API."""
         try:
-            response = requests.get(f"{Mac_Vendor_API}{mac_address}")
+            response = requests.get(f"{Mac_Vendor_API}{mac_address}", timeout=2)
             if response.status_code == 200:
                 return response.text.strip()
-            return "Unknown Vendor"
         except:
-            return "Unknown"
+            pass
+        return "Unknown Vendor"
 
-    def scan_port(self, ip, port, open_ports_list):
-        """Try to connect to a port and grab the banner."""
+    def detect_os(self, ip_address):
+        """Predict OS based on TTL (Time To Live)."""
+        try:
+            # Send packet to get TTL
+            pkt = scapy.IP(dst=ip_address)/scapy.ICMP()
+            ans = scapy.sr1(pkt, timeout=1, verbose=0)
+            
+            if ans:
+                ttl = ans.ttl
+                # Heuristic Logic
+                if ttl <= 64:
+                    return "Linux/Unix"
+                elif ttl <= 128:
+                    return "Windows"
+                elif ttl <= 255:
+                    return "Cisco/Network Device"
+        except:
+            pass
+        return "Unknown OS"
+
+    def scan_port_worker(self, ip, port):
+        """Worker function for ThreadPool."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1) # Fast timeout
+            sock.settimeout(0.5) # مهلة زمنية قصيرة جداً للسرعة
             result = sock.connect_ex((ip, port))
             
+            banner = ""
             if result == 0:
-                # Port is Open, try Banner Grabbing
-                banner = "Unknown Service"
+                # Port Open - Try grabbing banner
                 try:
-                    sock.send(b'HEAD / HTTP/1.0\r\n\r\n') # Trigger HTTP response
-                    banner_bytes = sock.recv(1024)
-                    banner = banner_bytes.decode('utf-8', errors='ignore').split('\n')[0].strip()
+                    sock.send(b'HEAD / HTTP/1.0\r\n\r\n')
+                    banner = sock.recv(1024).decode('utf-8', errors='ignore').split('\n')[0].strip()
                 except:
                     pass
-                
-                with self.lock:
-                    print(f"    {Fore.GREEN}[+] Port {port} OPEN: {Fore.YELLOW}{banner}")
-                    open_ports_list.append({"port": port, "service": banner})
+                sock.close()
+                return {"port": port, "status": "open", "service": banner if banner else "Unknown"}
             sock.close()
         except:
             pass
-
-    def thread_port_scan(self, ip):
-        """Manage threads for port scanning."""
-        print(f"{Fore.CYAN}[*] Scanning Top Ports on {ip}...")
-        open_ports = []
-        threads = []
-        
-        for port in COMMON_PORTS:
-            t = threading.Thread(target=self.scan_port, args=(ip, port, open_ports))
-            threads.append(t)
-            t.start()
-        
-        for t in threads:
-            t.join()
-            
-        return open_ports
+        return None
 
     def arp_scan(self, ip):
-        """Perform ARP Request to find active devices."""
-        print(f"{Fore.BLUE}[*] Starting ARP Discovery on {ip}...\n")
-        
+        print(f"{Fore.BLUE}[*] Discovery Phase: Sending ARP Requests to {ip}...")
         arp_request = scapy.ARP(pdst=ip)
         broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
-        arp_request_broadcast = broadcast/arp_request
-        
-        # Verbose=False to hide scapy default output
-        answered_list = scapy.srp(arp_request_broadcast, timeout=2, verbose=False)[0]
+        answered_list = scapy.srp(broadcast/arp_request, timeout=2, verbose=False)[0]
 
-        clients_list = []
-        print(f"{'IP Address':<20} {'MAC Address':<20} {'Vendor'}")
-        print("-" * 60)
-
+        clients = []
         for element in answered_list:
-            client_ip = element[1].psrc
-            client_mac = element[1].hwsrc
-            vendor = self.get_mac_vendor(client_mac)
-            
-            print(f"{Fore.WHITE}{client_ip:<20} {Fore.RED}{client_mac:<20} {Fore.MAGENTA}{vendor}")
-            
-            client_dict = {
-                "ip": client_ip, 
-                "mac": client_mac, 
-                "vendor": vendor,
-                "open_ports": []
-            }
-            clients_list.append(client_dict)
-
-        return clients_list
-
-    def save_results(self):
-        """Save scan data to JSON."""
-        filename = f"scan_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(filename, "w") as f:
-            json.dump(self.results, f, indent=4)
-        print(f"\n{Fore.GREEN}[√] Report saved to: {filename}")
+            clients.append({"ip": element[1].psrc, "mac": element[1].hwsrc})
+        return clients
 
     def run(self):
         self.print_logo()
-        options = self.get_arguments()
-        
-        # 1. Start ARP Discovery
+        self.get_arguments()
+
+        # 1. ARP Discovery
         active_hosts = self.arp_scan(self.target_ip)
-        self.results = active_hosts
+        
+        if not active_hosts:
+            print(f"{Fore.RED}[!] No hosts found. Check your permissions (sudo) or IP range.")
+            return
 
-        # 2. Port Scan if user requested or default logic
-        if active_hosts:
-            print(f"\n{Fore.BLUE}[*] Hosts found: {len(active_hosts)}. Starting Port Scan & Banner Grabbing...\n")
-            for host in active_hosts:
-                # Do Deep Scan on found hosts
-                found_ports = self.thread_port_scan(host['ip'])
-                host['open_ports'] = found_ports
-        else:
-            print(f"{Fore.RED}[!] No hosts found or permission denied (Try sudo).")
+        print(f"{Fore.GREEN}[+] Found {len(active_hosts)} active hosts.\n")
+        
+        # 2. Deep Scan (OS + Ports)
+        for host in active_hosts:
+            ip = host['ip']
+            mac = host['mac']
+            vendor = self.get_mac_vendor(mac)
+            os_guess = self.detect_os(ip)
 
-        # 3. Save
+            print(f"{Fore.YELLOW}══════════════════════════════════════════════════")
+            print(f"Target: {Fore.WHITE}{ip}")
+            print(f"MAC:    {Fore.WHITE}{mac} ({vendor})")
+            print(f"OS:     {Fore.CYAN}{os_guess} (TTL estimate)")
+            print(f"{Fore.YELLOW}══════════════════════════════════════════════════")
+
+            # 3. ThreadPool Port Scanning
+            open_ports = []
+            print(f"[*] Scanning {len(self.port_range)} ports...")
+            
+            # استخدام ThreadPoolExecutor لتسريع العملية بشكل جنوني
+            with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+                # نجهز المهام
+                future_to_port = {executor.submit(self.scan_port_worker, ip, port): port for port in self.port_range}
+                
+                # شريط التقدم باستخدام tqdm
+                for future in tqdm(concurrent.futures.as_completed(future_to_port), total=len(self.port_range), leave=False, unit="port"):
+                    result = future.result()
+                    if result:
+                        print(f"    {Fore.GREEN}➜ Port {result['port']:<5} OPEN : {result['service']}")
+                        open_ports.append(result)
+
+            host['vendor'] = vendor
+            host['os'] = os_guess
+            host['ports'] = open_ports
+            self.results.append(host)
+            print("")
+
+        # 4. Save
         self.save_results()
+
+    def save_results(self):
+        filename = f"scan_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, "w") as f:
+            json.dump(self.results, f, indent=4)
+        print(f"{Fore.GREEN}[√] Full report saved to: {filename}")
 
 if __name__ == "__main__":
     try:
         scanner = NetworkScanner()
         scanner.run()
     except KeyboardInterrupt:
-        print(f"\n{Fore.RED}[!] Ctrl+C Detected. Exiting gracefully.")
+        print(f"\n{Fore.RED}[!] Aborted by user.")
     except PermissionError:
-        print(f"\n{Fore.RED}[!] Error: Run as Root/Administrator (Required for ARP/Scapy).")
+        print(f"\n{Fore.RED}[!] Error: Please run as Root/Administrator.")
