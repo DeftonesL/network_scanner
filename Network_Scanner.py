@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Ultimate Network Scanner v3.0
-Author: Saleh
-Features: ARP Discovery, OS Detection (TTL), ThreadPool Port Scan, Custom Ranges, Banner Grabbing.
-"""
-
 import scapy.all as scapy
 import argparse
 import socket
@@ -15,12 +9,10 @@ import json
 import concurrent.futures
 from datetime import datetime
 from colorama import init, Fore, Style
-from tqdm import tqdm  # شريط التقدم
+from tqdm import tqdm
 
-# Initialize Colorama
 init(autoreset=True)
 
-# Configuration
 Mac_Vendor_API = "https://api.macvendors.co/"
 
 class NetworkScanner:
@@ -31,16 +23,14 @@ class NetworkScanner:
 
     def get_arguments(self):
         parser = argparse.ArgumentParser(description="Ultimate Python Network Scanner v3.0")
-        parser.add_argument("-t", "--target", dest="target", help="Target IP / Range (e.g. 192.168.1.1/24)", required=True)
-        parser.add_argument("-p", "--ports", dest="ports", help="Port range (e.g. 1-1000, or 'top')", default="top")
+        parser.add_argument("-t", "--target", dest="target", required=True)
+        parser.add_argument("-p", "--ports", dest="ports", default="top")
         options = parser.parse_args()
-        
         self.target_ip = options.target
         self.port_range = self.parse_ports(options.ports)
         return options
 
     def parse_ports(self, port_str):
-        """Convert port argument into a list of integers."""
         if port_str == "top":
             return [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 3306, 3389, 5900, 8080, 8443]
         elif "-" in port_str:
@@ -67,15 +57,11 @@ class NetworkScanner:
         return "Unknown Vendor"
 
     def detect_os(self, ip_address):
-        """Predict OS based on TTL (Time To Live)."""
         try:
-            # Send packet to get TTL
             pkt = scapy.IP(dst=ip_address)/scapy.ICMP()
             ans = scapy.sr1(pkt, timeout=1, verbose=0)
-            
             if ans:
                 ttl = ans.ttl
-                # Heuristic Logic
                 if ttl <= 64:
                     return "Linux/Unix"
                 elif ttl <= 128:
@@ -87,15 +73,12 @@ class NetworkScanner:
         return "Unknown OS"
 
     def scan_port_worker(self, ip, port):
-        """Worker function for ThreadPool."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.5) # مهلة زمنية قصيرة جداً للسرعة
+            sock.settimeout(0.5)
             result = sock.connect_ex((ip, port))
-            
             banner = ""
             if result == 0:
-                # Port Open - Try grabbing banner
                 try:
                     sock.send(b'HEAD / HTTP/1.0\r\n\r\n')
                     banner = sock.recv(1024).decode('utf-8', errors='ignore').split('\n')[0].strip()
@@ -113,7 +96,6 @@ class NetworkScanner:
         arp_request = scapy.ARP(pdst=ip)
         broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
         answered_list = scapy.srp(broadcast/arp_request, timeout=2, verbose=False)[0]
-
         clients = []
         for element in answered_list:
             clients.append({"ip": element[1].psrc, "mac": element[1].hwsrc})
@@ -122,8 +104,7 @@ class NetworkScanner:
     def run(self):
         self.print_logo()
         self.get_arguments()
-
-        # 1. ARP Discovery
+        
         active_hosts = self.arp_scan(self.target_ip)
         
         if not active_hosts:
@@ -132,7 +113,6 @@ class NetworkScanner:
 
         print(f"{Fore.GREEN}[+] Found {len(active_hosts)} active hosts.\n")
         
-        # 2. Deep Scan (OS + Ports)
         for host in active_hosts:
             ip = host['ip']
             mac = host['mac']
@@ -145,16 +125,12 @@ class NetworkScanner:
             print(f"OS:     {Fore.CYAN}{os_guess} (TTL estimate)")
             print(f"{Fore.YELLOW}══════════════════════════════════════════════════")
 
-            # 3. ThreadPool Port Scanning
             open_ports = []
             print(f"[*] Scanning {len(self.port_range)} ports...")
             
-            # استخدام ThreadPoolExecutor لتسريع العملية بشكل جنوني
             with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-                # نجهز المهام
                 future_to_port = {executor.submit(self.scan_port_worker, ip, port): port for port in self.port_range}
                 
-                # شريط التقدم باستخدام tqdm
                 for future in tqdm(concurrent.futures.as_completed(future_to_port), total=len(self.port_range), leave=False, unit="port"):
                     result = future.result()
                     if result:
@@ -167,7 +143,6 @@ class NetworkScanner:
             self.results.append(host)
             print("")
 
-        # 4. Save
         self.save_results()
 
     def save_results(self):
